@@ -405,33 +405,32 @@ def pickem_handler(event, context):
 def results_update_handler(event, context):
     week_num = get_current_week()
 
-    games = get_schedule(week_num)
     if week_num > 1:
-        games.extend(get_schedule(week_num - 1))
+        games = get_schedule(week_num - 1)
 
-    picks = get_open_picks()
+        picks = get_open_picks()
 
-    for pick in picks:
-        team_won = None
+        for pick in picks:
+            team_won = None
 
-        if 'sportRadarGameID' not in pick:
-            continue
+            if 'sportRadarGameID' not in pick:
+                continue
 
-        for game in games:
-            if pick['sportRadarGameID'] == game['id']:
-                if not game['status'] == 'closed':
-                    break
+            for game in games:
+                if pick['sportRadarGameID'] == game['id']:
+                    if not game['status'] == 'closed':
+                        break
 
-                team_side = 'away'
-                other_side = 'home'
-                if pick['selectedTeam'] == game['home']['name'].split()[-1].lower():
-                    team_side = 'home'
-                    other_side = 'away'
+                    team_side = 'away'
+                    other_side = 'home'
+                    if pick['selectedTeam'] == game['home']['name'].split()[-1].lower():
+                        team_side = 'home'
+                        other_side = 'away'
 
-                if game['scoring']['{:}_points'.format(team_side)] > game['scoring']['{:}_points'.format(other_side)]:
-                    team_won = True
-                else:
-                    team_won = False
+                    if game['scoring']['{:}_points'.format(team_side)] > game['scoring']['{:}_points'.format(other_side)]:
+                        team_won = True
+                    else:
+                        team_won = False
 
-        if team_won is not None:
-            update_result(pick, team_won)
+            if team_won is not None:
+                update_result(pick, team_won)
