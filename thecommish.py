@@ -67,6 +67,38 @@ locs_to_teams = {
     'washington': 'redskins'
 }
 
+scoreboard_to_team = {
+    'ari': 'cardinals',
+    'atl': 'falcons',
+    'bal': 'ravens',
+    'buf': 'bills',
+    'car': 'panthers',
+    'chi': 'bears',
+    'cin': 'bengals',
+    'cle': 'browns',
+    'dal': 'cowboys',
+    'den': 'broncos',
+    'det': 'lions',
+    'gb': 'packers',
+    'hou': 'texans',
+    'ind': 'colts',
+    'jax': 'jaguars',
+    'mia': 'dolphins',
+    'min': 'vikings',
+    'no': 'saints',
+    'oak': 'raiders',
+    'phi': 'eagles',
+    'pit': 'steelers',
+    'sea': 'seahawks',
+    'tb': 'buccaneers',
+    'ten': 'titans',
+    'was': 'redskins',
+    'lac': 'chargers',
+    'lar': 'rams',
+    'nyg': 'giants',
+    'nyj': 'jets'
+}
+
 teams = ['jets', 'giants', 'rams', 'chargers']
 for k in locs_to_teams:
     if isinstance(locs_to_teams[k], basestring):
@@ -79,7 +111,6 @@ loc_aliases = {
     'ne': 'england',
     'philly': 'philadelphia',
     'sf': 'francisco',
-    'tampa': 'tampa',
     'pitt': 'pittsburgh',
     'nola': 'orleans',
     'indy': 'indianapolis',
@@ -135,6 +166,8 @@ def get_team(command_text):
             team = locs_to_teams[token]
         elif token in loc_aliases:
             team = locs_to_teams[loc_aliases[token]]
+        elif token in scoreboard_to_team:
+            team = scoreboard_to_team[token]
         if team is not None:
             break
 
@@ -351,7 +384,7 @@ def pickem_handler(event, context):
             team_playing = False
             standing_team_game_started = False
             game_started = False
-            current_time = datetime(2017, 9, 8, 1)  # datetime.utcnow()
+            current_time = datetime.utcnow()
             sr_game_id = None
             for game in games:
                 away_team = game['away']['name'].split()[-1].lower()
@@ -386,7 +419,7 @@ def pickem_handler(event, context):
             elif game_started:
                 return respond(
                     None,
-                    ":thumbsdown: The {:} game has started. You pick them now, cheater!".format(team.capitalize())
+                    ":thumbsdown: The {:} game has started. You can't pick them now, cheater!".format(team.capitalize())
                 )
             else:
                 submit_pick(user_id, week_num, team, user_name, sr_game_id)
@@ -395,7 +428,7 @@ def pickem_handler(event, context):
                     ":ok_hand: {:} has picked the {:} for week {:}".format(
                         user_name, team.capitalize(), week_num
                     ),
-                    in_channel=True
+                    in_channel=False
                 )
 
     else:
