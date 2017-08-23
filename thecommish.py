@@ -24,16 +24,18 @@ class UnknownTeam(Exception):
 
 slack_token = os.environ['slackAppToken']
 sr_token = os.environ['sportRadarToken']
+webhook_url = os.environ['slackWebHookURL']
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamo = boto3.resource('dynamodb')
 
-help_text = (
-    "Use this command to manage your pick'em selections.  "
-    "Either `pick [team]` to make a pick, `record` to check your record, " +
-    "or `standings` to check standings."
+help_text = "Use this command to manage your pick'em selections."
+help_attachment_text = (
+    "Use `/pickem [subcommand]` with one of the following:\n"
+    "Either `pick` to check your pick for the week, `pick [team]` to make a new pick, `record` to check your record, " +
+    "`who` to see who has picked this week, or `standings` to check standings, e.g. `/pickem pick pats`."
 )
 
 locs_to_teams = {
@@ -220,6 +222,16 @@ def get_standings():
     return standings
 
 
+def get_who_picked(week_num):
+    pick_table = dynamo.Table('pickem-picks')
+    response = pick_table.query(IndexName='weekNumber-index', KeyConditionExpression=Key('weekNumber').eq(week_num))
+    all_picks = response['Items']
+
+    this_week = sorted([pick['userName'] for pick in all_picks])
+
+    return this_week
+
+
 def get_open_picks():
     pick_table = dynamo.Table('pickem-picks')
     response = pick_table.scan()
@@ -242,7 +254,7 @@ def submit_pick(user_id, week_num, team, user_name, sr_game_id):
     )
 
 
-def respond(err, res=None, attachment_text=None, in_channel=False):
+def respond(err, res=None, attachment_text=None, in_channel=False, response_url=None):
 
     body = {
         'response_type': 'in_channel' if in_channel else 'ephemeral',
@@ -252,13 +264,21 @@ def respond(err, res=None, attachment_text=None, in_channel=False):
     if attachment_text:
         body['attachments'] = [{'text': attachment_text, 'mrkdwn_in': ['text']}]
 
-    return {
-        'statusCode': '400' if err else '200',
-        'body': err.message if err else json.dumps(body),
-        'headers': {
-            'Content-Type': 'application/json',
-        },
-    }
+    slack_data = err.message if err else json.dumps(body)
+
+    if response_url is not None:
+        requests.post(
+            response_url, data=slack_data,
+            headers={'Content-Type': 'application/json'}
+        )
+    else:
+        return {
+            'statusCode': '400' if err else '200',
+            'body': slack_data,
+            'headers': {
+                'Content-Type': 'application/json',
+            },
+        }
 
 
 def get_schedule(week_num):
@@ -294,6 +314,7 @@ def pickem_handler(event, context):
     command = params['command'][0]
     channel = params['channel_name'][0]
     command_text = params['text'][0]
+    response_url = params['response_url'][0]
 
     subcommand = command_text.strip().split()[0].lower()
 
@@ -301,7 +322,7 @@ def pickem_handler(event, context):
 
     if subcommand == 'help':
         """Return a help message."""
-        return respond(None, help_text)
+        respond(None, help_text, help_attachment_text, response_url=response_url)
 
     elif subcommand == 'standings':
         """Returns standings in channel for everyone to see."""
@@ -312,11 +333,11 @@ def pickem_handler(event, context):
         for row in standings:
             standings_string += '\n`{:<10} {:>5}`'.format(row['name'], row['wins'])
 
-        return respond(
+        respond(
             None,
             'Standings as of week {:}'.format(week_num),
             standings_string,
-            True
+            True, response_url=response_url
         )
 
     elif subcommand == 'record':
@@ -333,16 +354,16 @@ def pickem_handler(event, context):
                 'Win' if 'teamWon' in r and r['teamWon'] > 0 else 'Loss'
             )
 
-        return respond(
+        respond(
             None,
             "Your record: {:} wins, {:} losses".format(wins, losses),
-            record_string
+            record_string, response_url=response_url
         )
 
     elif subcommand == 'pick':
 
         if week_num > 17:
-            return respond(None, "The 2017 season has ended. Thanks for playing!")
+            respond(None, "The 2017 season has ended. Thanks for playing!", response_url=response_url)
 
         # In case the user has already made a pick this week
         standing_team = get_current_pick(user_id, week_num)
@@ -350,18 +371,20 @@ def pickem_handler(event, context):
         try:
             team = get_team(command_text)
         except UnknownTeam:
-            return respond(None, ":confused: Sorry, I don't know that team. Try again.")
+            respond(None, ":confused: Sorry, I don't know that team. Try again.", response_url=response_url)
         except NoTeamGiven:
             # Just report the current pick if there is one
             if standing_team is None:
-                return respond(
+                respond(
                     None,
-                    ":persevere: You haven't picked a team this week. Try `/pickem pick [team name]`."
+                    ":persevere: You haven't picked a team this week. Try `/pickem pick [team name]`.",
+                    response_url=response_url
                 )
             else:
-                return respond(
+                respond(
                     None,
-                    "You've picked {:} for this week. Good luck!".format(standing_team.capitalize())
+                    "You've picked {:} for this week. Good luck!".format(standing_team.capitalize()),
+                    response_url=response_url
                 )
 
         record = get_user_record(user_id, week_num)
@@ -374,9 +397,10 @@ def pickem_handler(event, context):
                 break
 
         if team_previously_chosen:
-            return respond(
+            respond(
                 None,
-                ":no_good: You already picked {:} in week {:}. Try again.".format(team.capitalize(), previous_week)
+                ":no_good: You already picked {:} in week {:}. Try again.".format(team.capitalize(), previous_week),
+                response_url=response_url
             )
         else:
             games = get_schedule(week_num)
@@ -405,34 +429,47 @@ def pickem_handler(event, context):
                     standing_team_game_started = True
 
             if standing_team_game_started:
-                return respond(
+                respond(
                     None,
                     ":thumbsdown: The {:} game has started. You can't change your pick now, cheater!".format(
                         standing_team.capitalize()
-                    )
+                    ), response_url=response_url
                 )
             elif not team_playing:
-                return respond(
+                respond(
                     None,
-                    ":no_good: The {:} aren't playing this week. Try again.".format(team.capitalize())
+                    ":no_good: The {:} aren't playing this week. Try again.".format(team.capitalize()),
+                    response_url=response_url
                 )
             elif game_started:
-                return respond(
+                respond(
                     None,
-                    ":thumbsdown: The {:} game has started. You can't pick them now, cheater!".format(team.capitalize())
+                    ":thumbsdown: The {:} game has started. You can't pick them now, cheater!".format(
+                        team.capitalize()
+                    ), response_url=response_url
                 )
             else:
                 submit_pick(user_id, week_num, team, user_name, sr_game_id)
-                return respond(
+                respond(
                     None,
                     ":ok_hand: {:} has picked the {:} for week {:}".format(
                         user_name, team.capitalize(), week_num
                     ),
-                    in_channel=False
+                    in_channel=False, response_url=response_url
                 )
 
+    elif subcommand == 'who':
+        users = get_who_picked(week_num)
+
+        respond(
+            None,
+            'Here are the people that have picked so far this week.',
+            attachment_text="\n".join(users),
+            response_url=response_url
+        )
+
     else:
-        return respond(None, ":persevere: Invalid command! " + help_text)
+        respond(None, ":persevere: Invalid command! " + help_text, help_attachment_text, response_url=response_url)
 
 
 def results_update_handler(event, context):
@@ -467,3 +504,11 @@ def results_update_handler(event, context):
 
             if team_won is not None:
                 update_result(pick, team_won)
+
+
+def send_reminder_handler(event, context):
+    respond(
+        None,
+        "It's that time! Don't forget to make your pick for the week! :football:",
+        in_channel=True, response_url=webhook_url
+    )
