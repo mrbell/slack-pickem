@@ -273,13 +273,17 @@ def respond(err, res=None, attachment_text=None, in_channel=False, response_url=
             headers={'Content-Type': 'application/json'}
         )
     else:
-        return {
+        to_return = {
             'statusCode': '400' if err else '200',
-            'body': slack_data,
-            'headers': {
-                'Content-Type': 'application/json',
-            },
+            'body': err.message if err else slack_data
         }
+
+        if not err:
+            to_return['headers'] = {
+                'Content-Type': 'application/json',
+            }
+
+        return to_return
 
 
 def get_schedule(week_num):
@@ -305,6 +309,8 @@ def update_result(row, outcome):
 
 def receptionist_handler(event, context):
 
+    # WHY ISN'T THIS WORKING!?
+
     params = parse_qs(event['body'])
     token = params['token'][0]
     if token != slack_token:
@@ -312,12 +318,12 @@ def receptionist_handler(event, context):
         return respond(Exception('Invalid request token'))
 
     command_text = params['text'][0]
-    response_url = params['response_url'][0]
 
     subcommand = command_text.strip().split()[0].lower()
 
     if subcommand == 'help':
         """Return a help message."""
+
         respond(None, help_text, help_attachment_text)
 
     elif subcommand == 'standings' or subcommand == 'record' or subcommand == 'pick' or subcommand == 'who':
@@ -325,11 +331,11 @@ def receptionist_handler(event, context):
         sns = boto3.client('sns')
         sns.publish(
             TopicArn=sns_arn,
-            Message=json.dumps({'default': json.dumps(event)}),
+            Message=json.dumps({'default': json.dumps(params)}),
             MessageStructure='json'
         )
 
-        respond(None, "")
+        respond(None, "Working on it...")
 
     else:
         respond(None, ":persevere: Invalid command! " + help_text, help_attachment_text)
@@ -337,9 +343,10 @@ def receptionist_handler(event, context):
 
 def pickem_handler(event, context):
 
-    event = json.loads(event['Records'][0]['Sns']['Message'])
-
+    ## Uncomment this when I trigger from SNS
+    # params = json.loads(event['Records'][0]['Sns']['Message'])
     params = parse_qs(event['body'])
+
     token = params['token'][0]
     if token != slack_token:
         logger.error("Request token (%s) does not match expected", token)
