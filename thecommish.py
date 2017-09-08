@@ -25,6 +25,7 @@ class UnknownTeam(Exception):
 slack_token = os.environ['slackAppToken']
 sr_token = os.environ['sportRadarToken']
 webhook_url = os.environ['slackWebHookURL']
+sns_arn = os.environ['snsARN']
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -302,7 +303,42 @@ def update_result(row, outcome):
     pick_table.put_item(Item=new_row)
 
 
+def receptionist_handler(event, context):
+
+    params = parse_qs(event['body'])
+    token = params['token'][0]
+    if token != slack_token:
+        logger.error("Request token (%s) does not match expected", token)
+        return respond(Exception('Invalid request token'))
+
+    command_text = params['text'][0]
+    response_url = params['response_url'][0]
+
+    subcommand = command_text.strip().split()[0].lower()
+
+    if subcommand == 'help':
+        """Return a help message."""
+        respond(None, help_text, help_attachment_text)
+
+    elif subcommand == 'standings' or subcommand == 'record' or subcommand == 'pick' or subcommand == 'who':
+
+        sns = boto3.client('sns')
+        sns.publish(
+            TopicArn=sns_arn,
+            Message=json.dumps({'default': json.dumps(event)}),
+            MessageStructure='json'
+        )
+
+        respond(None, "")
+
+    else:
+        respond(None, ":persevere: Invalid command! " + help_text, help_attachment_text)
+
+
 def pickem_handler(event, context):
+
+    event = json.loads(event['Records'][0]['Sns']['Message'])
+
     params = parse_qs(event['body'])
     token = params['token'][0]
     if token != slack_token:
