@@ -411,7 +411,7 @@ def receptionist_handler(event, context):
             MessageStructure='json'
         )
 
-        return respond("")
+        return respond("One sec...")
 
     else:
         return respond(
@@ -419,13 +419,8 @@ def receptionist_handler(event, context):
         )
 
 
-def respond(response_text=None, attachment_text=None,
+def respond(response_text, attachment_text=None,
             in_channel=False, response_url=None, is_error=False):
-
-    if response_text is None and not is_error:
-        response_text = ""
-    elif response_text is None and is_error:
-        response_text = "An unspecified error has occurred!"
 
     body = {
         'response_type': 'in_channel' if in_channel else 'ephemeral',
