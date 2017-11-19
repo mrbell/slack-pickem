@@ -13,32 +13,20 @@ import math
 
 from urlparse import parse_qs
 
-
-class NoTeamGiven(Exception):
-    pass
-
-
-class UnknownTeam(Exception):
-    pass
-
-
-slack_token = os.environ['slackAppToken']
-sr_token = os.environ['sportRadarToken']
-webhook_url = os.environ['slackWebHookURL']
-sns_arn = os.environ['snsARN']
-
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
-dynamo = boto3.resource('dynamodb')
+"""
+Resources
+"""
 
 help_text = "Use this command to manage your pick'em selections."
 help_attachment_text = (
     "Use `/pickem [subcommand]` with one of the following:\n"
-    "Either `pick` to check your pick for the week, `pick [team]` to make a new pick, `record` to check your record, " +
-    "`who` to see who has picked this week, or `standings` to check standings, e.g. `/pickem pick pats`."
+    "Either `pick` to check your pick for the week, `pick [team]` " +
+    "to make a new pick, `record` to check your record, " +
+    "`who` to see who has picked this week, or `standings` to check " +
+    "standings, e.g. `/pickem pick pats`."
 )
 
+# Mapping of normalized team locations to normalized team nicknames
 locs_to_teams = {
     'arizona': 'cardinals',
     'atlanta': 'falcons',
@@ -70,6 +58,7 @@ locs_to_teams = {
     'washington': 'redskins'
 }
 
+# Mapping from NFL scoreboard abbreviations to normalized team names
 scoreboard_to_team = {
     'ari': 'cardinals',
     'atl': 'falcons',
@@ -102,6 +91,7 @@ scoreboard_to_team = {
     'nyj': 'jets'
 }
 
+# Compile a list of teams
 teams = ['jets', 'giants', 'rams', 'chargers']
 for k in locs_to_teams:
     if isinstance(locs_to_teams[k], basestring):
@@ -110,6 +100,7 @@ for k in locs_to_teams:
         teams.extend(locs_to_teams[k])
 teams = set(teams)
 
+# Mapping from some common location nicknames to normalized locations
 loc_aliases = {
     'ne': 'england',
     'philly': 'philadelphia',
@@ -121,6 +112,7 @@ loc_aliases = {
     'kc': 'kansas'
 }
 
+# Mapping from some common alternate team nicknames to normalized team nicknames
 team_aliases = {
     'cards': 'cardinals',
     'jags': 'jaguars',
@@ -130,24 +122,69 @@ team_aliases = {
     'bucs': 'buccaneers'
 }
 
-week_1_start = datetime(2017, 9, 5)
+# Various tokens that we will need
+slack_token = os.environ['slackAppToken']
+sr_token = os.environ['sportRadarToken']
+webhook_url = os.environ['slackWebHookURL']
+sns_arn = os.environ['snsARN']
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+dynamo = boto3.resource('dynamodb')
+
+week_1_start = datetime(2017, 9, 5)  # Obviously only works for 2017 season
+
+"""
+Custom exceptions
+"""
+
+class NoTeamGiven(Exception):
+    pass
 
 
-def get_current_week():
-    test = datetime.today()
+class UnknownTeam(Exception):
+    pass
+
+"""
+Helper functions
+"""
+
+def get_current_week(custom_date=None):
+    """
+    Get the number of the current week as an integer.
+    Weeks start on Tuesday during the season.
+    Returns 1 before the season has started (say over the summer).
+    """
+    if custom_date is None:
+        test = datetime.today()
+    else:
+        test = custom_date
+
     return max([
         1,
-        int(math.floor((test - week_1_start).total_seconds() / 3600.0 / 24.0 / 7.0) + 1)
+        int(
+            1 + math.floor(
+                (test - week_1_start).total_seconds() / 3600.0 / 24.0 / 7.0
+            )
+        )
     ])
 
 
-def get_team(command_text):
-    tmp = command_text.strip().split()
-    if len(tmp) == 1:
+def get_team(user_entry):
+    """
+    Given a USER_ENTRY team name, return a normalized team name if one is
+    recognized, else raise an UnknownTeam exception or a NoTeamGiven exception
+    if USER_ENTRY is blank.
+    """
+
+    if len(user_entry) == 0:
         raise NoTeamGiven()
 
+    tmp = user_entry.strip().split()
+
     team_choice = (
-        " ".join(tmp[1:])
+        " ".join(tmp)
         .lower()
         .replace('.', '')
         .replace('new', '')
@@ -181,9 +218,18 @@ def get_team(command_text):
 
 
 def get_user_record(user_id, week_num):
+    """
+    Return the set of picks and results from previous weeks. Returns a list of
+    previous selections, sorted in ascending week number. Each selection is a
+    dictionary with items `weekNumber`, `selectedTeam`, `userId`,
+    and `teamWon` (1 if the selected team won that week).
+    """
     pick_table = dynamo.Table('pickem-picks')
     response = pick_table.query(
-        KeyConditionExpression=Key('userId').eq(user_id) & Key('weekNumber').lt(week_num)
+        KeyConditionExpression=(
+            Key('userId').eq(user_id) &
+            Key('weekNumber').lt(week_num)
+        )
     )
     record = response['Items']
 
@@ -191,6 +237,10 @@ def get_user_record(user_id, week_num):
 
 
 def get_current_pick(user_id, week_num):
+    """
+    Get the pick for the given user USER_ID and week number WEEK_NUM. Returns
+    None if no pick has been made.
+    """
     pick_table = dynamo.Table('pickem-picks')
     response = pick_table.get_item(
         Key={'userId': user_id, 'weekNumber': week_num}
@@ -203,6 +253,11 @@ def get_current_pick(user_id, week_num):
 
 
 def get_standings():
+    """
+    Get the standings (number of wins to date) for all players.
+    Returns a sorted (descending) list of dictionaries with keys
+    'userName' and `wins`.
+    """
     pick_table = dynamo.Table('pickem-picks')
     response = pick_table.scan()
     all_picks = response['Items']
@@ -218,14 +273,23 @@ def get_standings():
         if 'teamWon' in row and row['teamWon'] > 0:
             standings[row['userId']]['wins'] += 1
 
-    standings = sorted([standings[k] for k in standings], key=lambda x: x['wins'], reverse=True)
+    standings = sorted(
+        [standings[k] for k in standings],
+        key=lambda x: x['wins'], reverse=True
+    )
 
     return standings
 
 
 def get_who_picked(week_num):
+    """
+    Returns a list of user names that have made picks for the current week.
+    """
     pick_table = dynamo.Table('pickem-picks')
-    response = pick_table.query(IndexName='weekNumber-index', KeyConditionExpression=Key('weekNumber').eq(week_num))
+    response = pick_table.query(
+        IndexName='weekNumber-index',
+        KeyConditionExpression=Key('weekNumber').eq(week_num)
+    )
     all_picks = response['Items']
 
     this_week = sorted([pick['userName'] for pick in all_picks])
@@ -234,6 +298,9 @@ def get_who_picked(week_num):
 
 
 def get_open_picks():
+    """
+    Return a list of pick entries where a result has not been recorded.
+    """
     pick_table = dynamo.Table('pickem-picks')
     response = pick_table.scan()
     all_picks = response['Items']
@@ -242,6 +309,14 @@ def get_open_picks():
 
 
 def submit_pick(user_id, week_num, team, user_name, sr_game_id):
+    """
+    Log a pick to the database for the given
+        USER_ID: Slack user ID,
+        WEEK_NUM: The week number for the pick,
+        TEAM: The normalized team name from `get_team`,
+        USER_NAME: The Slack user name,
+        SR_GAME_ID: The sports radar game identifier
+    """
     pick_table = dynamo.Table('pickem-picks')
     pick_table.put_item(
         Item={
@@ -255,38 +330,15 @@ def submit_pick(user_id, week_num, team, user_name, sr_game_id):
     )
 
 
-def respond(err, res=None, attachment_text=None, in_channel=False, response_url=None):
-
-    body = {
-        'response_type': 'in_channel' if in_channel else 'ephemeral',
-        'text': res
-    }
-
-    if attachment_text:
-        body['attachments'] = [{'text': attachment_text, 'mrkdwn_in': ['text']}]
-
-    slack_data = err.message if err else json.dumps(body)
-
-    if response_url is not None:
-        requests.post(
-            response_url, data=slack_data,
-            headers={'Content-Type': 'application/json'}
-        )
-    else:
-        to_return = {
-            'statusCode': '400' if err else '200',
-            'body': err.message if err else slack_data
-        }
-
-        if not err:
-            to_return['headers'] = {
-                'Content-Type': 'application/json',
-            }
-
-        return to_return
-
-
 def get_schedule(week_num):
+    """
+    Get the scheduled games for the given WEEK_NUM. Returns a list of
+    games as dicts, each having a key `scheduled` indicating when the game
+    is scheduled to start as a datetime string of format
+    '%Y-%m-%dT%H:%M:%S+00:00', and a 'home' and 'away' team listing,
+    each dicts with a key 'name' that gives the names of the home and away
+    teams.
+    """
     ws_url = (
         'https://api.sportradar.us/' +
         'nfl-ot2/games/{:}/REG/' +
@@ -299,12 +351,36 @@ def get_schedule(week_num):
 
 
 def update_result(row, outcome):
+    """
+    For a given pick entry ROW, set the `teamWon` field based on the boolean
+    OUTCOME, which is True if the selected team won. Write results to the
+    database.
+    """
 
     new_row = dict(row)
     new_row['teamWon'] = 1 if outcome else 0
 
     pick_table = dynamo.Table('pickem-picks')
     pick_table.put_item(Item=new_row)
+
+
+def parse_subcommand(command_text):
+    """
+    Parse the subcommand from the given COMMAND_TEXT, which is everything that
+    follows `/pickem`.  The subcommand is the option passed to the command, e.g.
+    'pick' in the case of `/pickem pick`.
+    """
+    return command_text.strip().split()[0].lower()
+
+
+def parse_options(command_text):
+    """
+    Parse options passed into the command, e.g. returns 'cards' from the
+    command `/pickem pick cards`, where `pickem` is the command, `pick` is the
+    subcommand, and cards is the option passed to the subcommand.
+    """
+    sc = parse_subcommand(command_text)
+    return command_text.replace(sc, '').strip()
 
 
 def receptionist_handler(event, context):
@@ -315,18 +391,18 @@ def receptionist_handler(event, context):
     token = params['token'][0]
     if token != slack_token:
         logger.error("Request token (%s) does not match expected", token)
-        return respond(Exception('Invalid request token'))
+        return respond('Invalid request token', is_error=True)
 
     command_text = params['text'][0]
 
-    subcommand = command_text.strip().split()[0].lower()
+    subcommand = parse_subcommand(command_text)
 
     if subcommand == 'help':
         """Return a help message."""
+        return respond(help_text, help_attachment_text)
 
-        respond(None, help_text, help_attachment_text)
-
-    elif subcommand == 'standings' or subcommand == 'record' or subcommand == 'pick' or subcommand == 'who':
+    elif (subcommand == 'standings' or subcommand == 'record' or
+          subcommand == 'pick' or subcommand == 'who'):
 
         sns = boto3.client('sns')
         sns.publish(
@@ -335,22 +411,61 @@ def receptionist_handler(event, context):
             MessageStructure='json'
         )
 
-        respond(None, "Working on it...")
+        return respond("")
 
     else:
-        respond(None, ":persevere: Invalid command! " + help_text, help_attachment_text)
+        return respond(
+            ":persevere: Invalid command! " + help_text, help_attachment_text
+        )
+
+
+def respond(response_text=None, attachment_text=None,
+            in_channel=False, response_url=None, is_error=False):
+
+    if response_text is None and not is_error:
+        response_text = ""
+    elif response_text is None and is_error:
+        response_text = "An unspecified error has occurred!"
+
+    body = {
+        'response_type': 'in_channel' if in_channel else 'ephemeral',
+        'text': response_text
+    }
+
+    if attachment_text:
+        body['attachments'] = [{'text': attachment_text, 'mrkdwn_in': ['text']}]
+
+    if response_url is not None:
+        requests.post(
+            response_url, json=body,
+            headers={'Content-Type': 'application/json'}
+        )
+    else:
+        to_return = {
+            'statusCode': '400' if is_error else '200',
+            'body': response_text if is_error else json.dumps(body)
+        }
+
+        if not is_error:
+            to_return['headers'] = {
+                'Content-Type': 'application/json',
+            }
+
+        return to_return
 
 
 def pickem_handler(event, context):
-
+    """
+    Handles the requests from the `/pickem` command to the lambda function
+    that is responsible for handling API requests.
+    """
     ## Uncomment this when I trigger from SNS
-    # params = json.loads(event['Records'][0]['Sns']['Message'])
     params = parse_qs(event['body'])
 
     token = params['token'][0]
     if token != slack_token:
         logger.error("Request token (%s) does not match expected", token)
-        return respond(Exception('Invalid request token'))
+        return respond('Invalid request token', is_error=True)
 
     user_name = params['user_name'][0]
     user_id = params['user_id'][0]
@@ -359,13 +474,14 @@ def pickem_handler(event, context):
     command_text = params['text'][0]
     response_url = params['response_url'][0]
 
-    subcommand = command_text.strip().split()[0].lower()
+    subcommand = parse_subcommand(command_text)
+    options = parse_options(command_text)
 
     week_num = get_current_week()
 
     if subcommand == 'help':
         """Return a help message."""
-        respond(None, help_text, help_attachment_text, response_url=response_url)
+        return respond(help_text, help_attachment_text)
 
     elif subcommand == 'standings':
         """Returns standings in channel for everyone to see."""
@@ -374,22 +490,30 @@ def pickem_handler(event, context):
         standings_string = '`{:<10} {:>5}`\n'.format('Name', 'Wins')
         standings_string += '`' + "-"*16 + '`'
         for row in standings:
-            standings_string += '\n`{:<10} {:>5}`'.format(row['name'], row['wins'])
+            standings_string += '\n`{:<10} {:>5}`'.format(
+                row['name'], row['wins']
+            )
 
-        respond(
-            None,
+        return respond(
             'Standings as of week {:}'.format(week_num),
             standings_string,
-            True, response_url=response_url
+            in_channel=True
         )
 
     elif subcommand == 'record':
         record = get_user_record(user_id, week_num)
 
         wins = sum(r['teamWon'] for r in record if 'teamWon' in r)
-        losses = week_num - 1 - wins
+        # We occassionally gift wins, which are added at negative week number
+        actual_wins = sum(
+            r['teamWon'] for r in record
+            if 'teamWon' in r and r['weekNumber'] > 0
+        )
+        losses = week_num - 1 - actual_wins
 
-        record_string = "`{:<10} {:<16} {:<10}`\n".format('Week', 'Team', 'Result')
+        record_string = "`{:<10} {:<16} {:<10}`\n".format(
+            'Week', 'Team', 'Result'
+            )
         record_string += "`" + "-"*38 + "`"
         for r in record:
             record_string += "\n`{:<10} {:<16} {:<10}`".format(
@@ -397,8 +521,198 @@ def pickem_handler(event, context):
                 'Win' if 'teamWon' in r and r['teamWon'] > 0 else 'Loss'
             )
 
-        respond(
-            None,
+        return respond(
+            "Your record: {:} wins, {:} losses".format(wins, losses),
+            record_string
+        )
+
+    elif subcommand == 'pick':
+
+        if week_num > 17:
+            return respond(
+                "The 2017 season has ended. Thanks for playing!"
+            )
+
+        # In case the user has already made a pick this week
+        standing_team = get_current_pick(user_id, week_num)
+
+        try:
+            team = get_team(options)
+        except UnknownTeam:
+            return respond(
+                ":confused: Sorry, I don't know that team. Try again."
+            )
+        except NoTeamGiven:
+            # Just report the current pick if there is one
+            if standing_team is None:
+                return respond(
+                    ":persevere: You haven't picked a team this week. " +
+                    "Try `/pickem pick [team name]`."
+                )
+            else:
+                return respond(
+                    "You've picked {:} for this week. Good luck!".format(
+                        standing_team.capitalize()
+                    )
+                )
+
+        record = get_user_record(user_id, week_num)
+        team_previously_chosen = False
+        previous_week = None
+        for r in record:
+            if team == r['selectedTeam']:
+                team_previously_chosen = True
+                previous_week = r['weekNumber']
+                break
+
+        if team_previously_chosen:
+            return respond(
+                ":no_good: You already picked {:} in week {:}. " +
+                "Try again.".format(team.capitalize(), previous_week)
+            )
+        else:
+            games = get_schedule(week_num)
+
+            team_playing = False
+            standing_team_game_started = False
+            game_started = False
+            current_time = datetime.utcnow()
+            sr_game_id = None
+            for game in games:
+                away_team = game['away']['name'].split()[-1].lower()
+                home_team = game['home']['name'].split()[-1].lower()
+                game_time = datetime.strptime(
+                    game['scheduled'],
+                    '%Y-%m-%dT%H:%M:%S+00:00'
+                )
+
+                if away_team == team or home_team == team:
+                    team_playing = True
+                    if current_time >= game_time:
+                        game_started = True
+                    sr_game_id = game['id']
+
+                if (
+                    standing_team is not None and
+                    (
+                        away_team == standing_team or
+                        home_team == standing_team
+                    ) and
+                    current_time >= game_time
+                ):
+                    standing_team_game_started = True
+
+            if standing_team_game_started:
+                return respond(
+                    ":thumbsdown: The {:} game has started. " +
+                    "You can't change your pick now, cheater!".format(
+                        standing_team.capitalize()
+                    )
+                )
+            elif not team_playing:
+                return respond(
+                    ":no_good: The {:} aren't playing this week. " +
+                    "Try again.".format(team.capitalize())
+                )
+            elif game_started:
+                return respond(
+                    ":thumbsdown: The {:} game has started. " +
+                    "You can't pick them now, cheater!".format(
+                        team.capitalize()
+                    )
+                )
+            else:
+                submit_pick(user_id, week_num, team, user_name, sr_game_id)
+                return respond(
+                    ":ok_hand: {:} has picked the {:} for week {:}".format(
+                        user_name, team.capitalize(), week_num
+                    )
+                )
+
+    elif subcommand == 'who':
+        users = get_who_picked(week_num)
+
+        return respond(
+            'Here are the people that have picked so far this week.',
+            attachment_text="\n".join(users)
+        )
+
+    else:
+        return respond(
+            ":persevere: Invalid command! " +
+            help_text, help_attachment_text
+        )
+
+
+def worker_handler(event, context):
+    """
+    Handles the requests from the `/pickem` command to the lambda function
+    that is responsible for handling API requests.
+    """
+    ## Uncomment this when I trigger from SNS
+    params = json.loads(event['Records'][0]['Sns']['Message'])
+
+    token = params['token'][0]
+    if token != slack_token:
+        logger.error("Request token (%s) does not match expected", token)
+        raise Exception('Invalid request token!')
+
+    user_name = params['user_name'][0]
+    user_id = params['user_id'][0]
+    command = params['command'][0]
+    channel = params['channel_name'][0]
+    command_text = params['text'][0]
+    response_url = params['response_url'][0]
+
+    subcommand = parse_subcommand(command_text)
+    options = parse_options(command_text)
+
+    week_num = get_current_week()
+
+    if subcommand == 'help':
+        """Return a help message."""
+        return respond(help_text, help_attachment_text,
+                       response_url=response_url)
+
+    elif subcommand == 'standings':
+        """Returns standings in channel for everyone to see."""
+        standings = get_standings()
+
+        standings_string = '`{:<10} {:>5}`\n'.format('Name', 'Wins')
+        standings_string += '`' + "-"*16 + '`'
+        for row in standings:
+            standings_string += '\n`{:<10} {:>5}`'.format(
+                row['name'], row['wins']
+            )
+
+        return respond(
+            'Standings as of week {:}'.format(week_num),
+            standings_string,
+            in_channel=True, response_url=response_url
+        )
+
+    elif subcommand == 'record':
+        record = get_user_record(user_id, week_num)
+
+        wins = sum(r['teamWon'] for r in record if 'teamWon' in r)
+        # We occassionally gift wins, which are added at negative week number
+        actual_wins = sum(
+            r['teamWon'] for r in record
+            if 'teamWon' in r and r['weekNumber'] > 0
+        )
+        losses = week_num - 1 - actual_wins
+
+        record_string = "`{:<10} {:<16} {:<10}`\n".format(
+            'Week', 'Team', 'Result'
+            )
+        record_string += "`" + "-"*38 + "`"
+        for r in record:
+            record_string += "\n`{:<10} {:<16} {:<10}`".format(
+                r['weekNumber'], r['selectedTeam'].capitalize(),
+                'Win' if 'teamWon' in r and r['teamWon'] > 0 else 'Loss'
+            )
+
+        return respond(
             "Your record: {:} wins, {:} losses".format(wins, losses),
             record_string, response_url=response_url
         )
@@ -406,27 +720,34 @@ def pickem_handler(event, context):
     elif subcommand == 'pick':
 
         if week_num > 17:
-            respond(None, "The 2017 season has ended. Thanks for playing!", response_url=response_url)
+            return respond(
+                "The 2017 season has ended. Thanks for playing!",
+                response_url=response_url
+            )
 
         # In case the user has already made a pick this week
         standing_team = get_current_pick(user_id, week_num)
 
         try:
-            team = get_team(command_text)
+            team = get_team(options)
         except UnknownTeam:
-            respond(None, ":confused: Sorry, I don't know that team. Try again.", response_url=response_url)
+            return respond(
+                ":confused: Sorry, I don't know that team. Try again.",
+                response_url=response_url
+            )
         except NoTeamGiven:
             # Just report the current pick if there is one
             if standing_team is None:
-                respond(
-                    None,
-                    ":persevere: You haven't picked a team this week. Try `/pickem pick [team name]`.",
+                return respond(
+                    ":persevere: You haven't picked a team this week. " +
+                    "Try `/pickem pick [team name]`.",
                     response_url=response_url
                 )
             else:
-                respond(
-                    None,
-                    "You've picked {:} for this week. Good luck!".format(standing_team.capitalize()),
+                return respond(
+                    "You've picked {:} for this week. Good luck!".format(
+                        standing_team.capitalize()
+                    ),
                     response_url=response_url
                 )
 
@@ -440,9 +761,9 @@ def pickem_handler(event, context):
                 break
 
         if team_previously_chosen:
-            respond(
-                None,
-                ":no_good: You already picked {:} in week {:}. Try again.".format(team.capitalize(), previous_week),
+            return respond(
+                ":no_good: You already picked {:} in week {:}. " +
+                "Try again.".format(team.capitalize(), previous_week),
                 response_url=response_url
             )
         else:
@@ -456,7 +777,10 @@ def pickem_handler(event, context):
             for game in games:
                 away_team = game['away']['name'].split()[-1].lower()
                 home_team = game['home']['name'].split()[-1].lower()
-                game_time = datetime.strptime(game['scheduled'], '%Y-%m-%dT%H:%M:%S+00:00')
+                game_time = datetime.strptime(
+                    game['scheduled'],
+                    '%Y-%m-%dT%H:%M:%S+00:00'
+                )
 
                 if away_team == team or home_team == team:
                     team_playing = True
@@ -466,56 +790,66 @@ def pickem_handler(event, context):
 
                 if (
                     standing_team is not None and
-                    (away_team == standing_team or home_team == standing_team) and
+                    (
+                        away_team == standing_team or
+                        home_team == standing_team
+                    ) and
                     current_time >= game_time
                 ):
                     standing_team_game_started = True
 
             if standing_team_game_started:
-                respond(
-                    None,
-                    ":thumbsdown: The {:} game has started. You can't change your pick now, cheater!".format(
+                return respond(
+                    ":thumbsdown: The {:} game has started. " +
+                    "You can't change your pick now, cheater!".format(
                         standing_team.capitalize()
-                    ), response_url=response_url
+                    ),
+                    response_url=response_url
                 )
             elif not team_playing:
-                respond(
-                    None,
-                    ":no_good: The {:} aren't playing this week. Try again.".format(team.capitalize()),
+                return respond(
+                    ":no_good: The {:} aren't playing this week. " +
+                    "Try again.".format(team.capitalize()),
                     response_url=response_url
                 )
             elif game_started:
-                respond(
-                    None,
-                    ":thumbsdown: The {:} game has started. You can't pick them now, cheater!".format(
+                return respond(
+                    ":thumbsdown: The {:} game has started. " +
+                    "You can't pick them now, cheater!".format(
                         team.capitalize()
-                    ), response_url=response_url
+                    ),
+                    response_url=response_url
                 )
             else:
                 submit_pick(user_id, week_num, team, user_name, sr_game_id)
-                respond(
-                    None,
+                return respond(
                     ":ok_hand: {:} has picked the {:} for week {:}".format(
                         user_name, team.capitalize(), week_num
                     ),
-                    in_channel=False, response_url=response_url
+                    response_url=response_url
                 )
 
     elif subcommand == 'who':
         users = get_who_picked(week_num)
 
-        respond(
-            None,
+        return respond(
             'Here are the people that have picked so far this week.',
             attachment_text="\n".join(users),
             response_url=response_url
         )
 
     else:
-        respond(None, ":persevere: Invalid command! " + help_text, help_attachment_text, response_url=response_url)
+        return respond(
+            ":persevere: Invalid command! " +
+            help_text, help_attachment_text, response_url=response_url
+        )
 
 
 def results_update_handler(event, context):
+    """
+    Run on a schedule to update pick results based on scores from the previous
+    week.
+    """
     week_num = get_current_week()
 
     if week_num > 1:
@@ -530,17 +864,23 @@ def results_update_handler(event, context):
                 continue
 
             for game in games:
+
+                home_team = game['home']['name'].split()[-1].lower()
+
                 if pick['sportRadarGameID'] == game['id']:
                     if not game['status'] == 'closed':
                         break
 
                     team_side = 'away'
                     other_side = 'home'
-                    if pick['selectedTeam'] == game['home']['name'].split()[-1].lower():
+                    if pick['selectedTeam'] == home_team:
                         team_side = 'home'
                         other_side = 'away'
 
-                    if game['scoring']['{:}_points'.format(team_side)] > game['scoring']['{:}_points'.format(other_side)]:
+                    if (
+                        game['scoring']['{:}_points'.format(team_side)] >
+                        game['scoring']['{:}_points'.format(other_side)]
+                    ):
                         team_won = True
                     else:
                         team_won = False
@@ -550,8 +890,11 @@ def results_update_handler(event, context):
 
 
 def send_reminder_handler(event, context):
-    respond(
-        None,
-        "It's that time! Don't forget to make your pick for the week! :football:",
-        in_channel=True, response_url=webhook_url
+    """
+    Reminds players to make a pick.
+    """
+    return respond(
+        "It's that time! " +
+        "Don't forget to make your pick for the week! :football:",
+        in_channel=True
     )
